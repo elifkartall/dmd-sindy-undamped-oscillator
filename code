@@ -1,0 +1,153 @@
+# ================================
+# 1. KÜTÜPHANELER
+# ================================
+!pip install pysindy
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+from numpy.linalg import svd, pinv
+from sklearn.metrics import mean_squared_error
+import pysindy as ps
+
+# ================================
+# 2. UNDAMPED OSCILLATOR 2
+# ================================
+
+def system(t, x):
+    x1, x2 = x
+    
+    dx1 = x2
+    dx2 = -x1 - x1**3
+    
+    return [dx1, dx2]
+
+# ================================
+# 3. VERİ ÜRETİMİ
+# ================================
+
+n_ic = 100
+t_span = (0, 10)
+t_eval = np.linspace(0, 10, 500)
+
+data = []
+
+for i in range(n_ic):
+    x0 = np.random.uniform(-2, 2, 2)
+    sol = solve_ivp(system, t_span, x0, t_eval=t_eval)
+    data.append(sol.y.T)
+
+data = np.array(data)
+
+# ================================
+# 4. DMD (TEK TRAJECTORY)
+# ================================
+
+X_single = data[0].T
+
+X1 = X_single[:, :-1]
+X2 = X_single[:, 1:]
+
+U, S, Vh = svd(X1, full_matrices=False)
+
+# ✅ DOĞRU RANK SEÇİMİ
+energy = np.cumsum(S) / np.sum(S)
+r = np.argmax(energy > 0.99) + 1  # %99 enerji
+
+print("Seçilen rank:", r)
+
+U_r = U[:, :r]
+S_r = np.diag(S[:r])
+V_r = Vh[:r, :]
+
+A_tilde = U_r.T @ X2 @ V_r.T @ np.linalg.inv(S_r)
+
+eigvals, W = np.linalg.eig(A_tilde)
+Phi = X2 @ V_r.T @ np.linalg.inv(S_r) @ W
+
+# ================================
+# DMD RECONSTRUCTION
+# ================================
+
+x0 = X_single[:, 0]
+b = pinv(Phi) @ x0
+
+time_dynamics = np.zeros((r, len(t_eval)), dtype=complex)
+
+for i in range(len(t_eval)):
+    time_dynamics[:, i] = b * np.exp(eigvals * t_eval[i])
+
+X_dmd = (Phi @ time_dynamics).real
+
+# ================================
+# DMD RMSE
+# ================================
+
+X_true = X_single[:, :len(t_eval)]
+
+rmse_dmd = np.sqrt(mean_squared_error(
+    X_true.flatten(),
+    X_dmd.flatten()
+))
+
+print("DMD RMSE:", rmse_dmd)
+
+# ================================
+# 5. SINDy
+# ================================
+
+X_sindy = np.vstack(data)
+
+dt = t_eval[1] - t_eval[0]
+
+poly_lib = ps.PolynomialLibrary(degree=3)
+
+model = ps.SINDy(
+    feature_library=poly_lib,
+    differentiation_method=ps.FiniteDifference(order=2)
+)
+
+model.fit(X_sindy, t=dt)
+
+print("\nSINDy model:")
+model.print()
+
+# Test için tek trajectory
+X_test = data[0]
+X_sindy_sim = model.simulate(X_test[0], t_eval)
+
+# ================================
+# SINDy RMSE
+# ================================
+
+rmse_sindy = np.sqrt(mean_squared_error(
+    X_test,
+    X_sindy_sim
+))
+
+print("SINDy RMSE:", rmse_sindy)
+
+# ================================
+# 6. GRAFİKLER
+# ================================
+
+plt.figure(figsize=(12,5))
+
+# DMD
+plt.subplot(1,2,1)
+plt.plot(t_eval, X_true[0,:], label='Gerçek')
+plt.plot(t_eval, X_dmd[0,:], '--', label='DMD')
+plt.title("DMD Reconstruction (x1)")
+plt.xlabel("Time")
+plt.legend()
+
+# SINDy
+plt.subplot(1,2,2)
+plt.plot(t_eval, X_test[:,0], label='Gerçek')
+plt.plot(t_eval, X_sindy_sim[:,0], '--', label='SINDy')
+plt.title("SINDy Reconstruction (x1)")
+plt.xlabel("Time")
+plt.legend()
+
+plt.tight_layout()
+plt.show()
